@@ -193,3 +193,65 @@ def test_non_windows_uses_bare_claude(monkeypatch):
 
     argv = run.call_args.args[0]
     assert argv[0] == "claude"
+
+
+# ---------- GRAPHIFY_API_TIMEOUT honoured by all backends ----------
+
+
+def test_resolve_api_timeout_default(monkeypatch):
+    monkeypatch.delenv("GRAPHIFY_API_TIMEOUT", raising=False)
+    assert llm._resolve_api_timeout() == 600.0
+
+
+def test_resolve_api_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("GRAPHIFY_API_TIMEOUT", "45")
+    assert llm._resolve_api_timeout() == 45.0
+
+
+def test_resolve_api_timeout_ignores_invalid(monkeypatch):
+    monkeypatch.setenv("GRAPHIFY_API_TIMEOUT", "not-a-number")
+    assert llm._resolve_api_timeout() == 600.0
+
+
+def test_resolve_api_timeout_ignores_nonpositive(monkeypatch):
+    monkeypatch.setenv("GRAPHIFY_API_TIMEOUT", "0")
+    assert llm._resolve_api_timeout() == 600.0
+
+
+def test_claude_cli_extraction_honours_timeout(monkeypatch, fake_claude):
+    monkeypatch.setenv("GRAPHIFY_API_TIMEOUT", "30")
+    llm._call_claude_cli("dummy", max_tokens=8192)
+    assert fake_claude.call_args.kwargs["timeout"] == 30.0
+
+
+def test_call_llm_claude_cli_branch_honours_timeout(monkeypatch, fake_claude):
+    monkeypatch.setenv("GRAPHIFY_API_TIMEOUT", "30")
+    llm._call_llm(prompt="x", backend="claude-cli", max_tokens=10)
+    assert fake_claude.call_args.kwargs["timeout"] == 30.0
+
+
+def test_simple_completion_resolves_cmd_shim_on_windows(monkeypatch):
+    """The label/_simple_completion path must spawn the resolved claude.cmd on
+    Windows; a bare "claude" fails CreateProcess (WinError 2) under npm installs."""
+    import json as _json
+    from unittest.mock import patch, MagicMock
+
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["argv0"] = args[0]
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stdout = _json.dumps({"result": "ok"})
+        return proc
+
+    def fake_which(name):
+        return r"C:\npm\claude.cmd" if name == "claude.cmd" else r"C:\npm\claude"
+
+    with patch("platform.system", return_value="Windows"), \
+         patch("shutil.which", side_effect=fake_which), \
+         patch("subprocess.run", side_effect=fake_run):
+        out = llm._call_llm("hi", backend="claude-cli")
+
+    assert out == "ok"
+    assert captured["argv0"] == r"C:\npm\claude.cmd"
